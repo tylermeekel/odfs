@@ -1,2 +1,7 @@
 storenode.bin*
 metanode.bin*
+
+/storenode/storenode
+/storenode/data
+
+/metanode/metanode
