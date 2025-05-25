@@ -101,19 +101,53 @@ handle_conn :: proc(conn: ^Conn) {
         return
     }
 
-    // Key Length (u32)
-    key_size, _ := endian.get_u32(all_data_buf[:4], endian.Byte_Order.Big)
+    switch packet_type {
+        case 0x00: // Create File
+            // Key Length (u32)
+            key_size, _ := endian.get_u32(all_data_buf[:4], endian.Byte_Order.Big)
 
-    // Read Key
-    key := all_data_buf[4:4 + key_size]
+            // Read Key
+            key := all_data_buf[4:4 + key_size]
 
-    // Read File Data
-    file_data := all_data_buf[4 + key_size:]
+            // Read File Data
+            file_data := all_data_buf[4 + key_size:]
 
-    // Hash Key
+            // Hash Key
+            file_name, ok := hash_key_data(key)
+            if !ok {
+                return
+            }
+            defer delete(file_name)
+
+            create_file(file_name, file_data)
+            // TODO: Send a response
+        case 0x01: // Get File Data
+            // Key Length (u32)
+            key_size, _ := endian.get_u32(all_data_buf[:4], endian.Byte_Order.Big)
+
+            // Read Key
+            key := all_data_buf[4:4 + key_size]
+            file_name, ok := hash_key_data(key)
+            if !ok {
+                return
+            }
+            defer delete(file_name)
+
+            file_data: []byte
+            file_data, ok = read_file(file_name)
+            if !ok {
+                return
+            }
+
+            // TODO: Make a proper packet structure for response
+            net.send_tcp(conn.socket, file_data)
+    }
+}
+
+hash_key_data :: proc(key_data: []byte, allocator := context.allocator) -> (string, bool) {
     sha_context: sha3.Context
     sha3.init_256(&sha_context)
-    sha3.update(&sha_context, key)
+    sha3.update(&sha_context, key_data)
     hash: [32]byte
     sha3.final(&sha_context, hash[:])
 
@@ -122,15 +156,16 @@ handle_conn :: proc(conn: ^Conn) {
     file_name, hex_clone_err := strings.clone_from_bytes(hash_hex)
     if hex_clone_err != nil {
         fmt.printfln("error cloning hash hex to string, %s", hex_clone_err)
-        return
+        return "", false
     }
-    defer delete(file_name)
 
-    create_file(file_name, file_data)
+    return file_name, true
 }
 
 // TODO: Create and add error return type
-create_file :: proc(file_name: string, file_data: []byte) {    
+// TODO: Consider a buffered reading/writing setup.
+create_file :: proc(file_name: string, file_data: []byte) {
+    // Some of this code is stripped directly from the "os.write_entire_file function"
     flags: int = os.O_WRONLY|os.O_CREATE
 
 	mode: int = 0
@@ -155,4 +190,35 @@ create_file :: proc(file_name: string, file_data: []byte) {
     if write_err != nil {
         fmt.printfln("error writing to file: %s", write_err)
     }
+}
+
+read_file :: proc(file_name: string) -> ([]byte, bool) {
+    // Some of this code is stripped directly from the "os.write_entire_file function"
+    flags: int = os.O_RDONLY
+
+	mode: int = 0
+    when ODIN_OS == .Linux || ODIN_OS == .Darwin {
+        mode = os.S_IRUSR | os.S_IRGRP | os.S_IROTH
+    }
+
+    file_path, concat_err := strings.concatenate({"./data/", file_name})
+    if concat_err != nil {
+        fmt.printfln("error concatenating file path parts: %s", concat_err)
+        return []byte{}, false
+    }
+    defer delete(file_path)
+
+    fd, open_err := os.open(file_path, flags, mode)
+    if open_err != nil {
+        fmt.printfln("error opening file: %s", open_err)
+        return []byte{}, false
+    }
+
+    file_data, ok := os.read_entire_file_from_handle(fd)
+    if !ok {
+        fmt.println("error reading entire file")
+        return []byte{}, false
+    }
+
+    return file_data, true
 }
