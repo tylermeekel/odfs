@@ -4,7 +4,10 @@ import "core:fmt"
 import "core:net"
 import "core:thread"
 import "core:encoding/endian"
+import "core:encoding/hex"
 import "core:os"
+import "core:crypto/sha3"
+import "core:strings"
 
 Server :: struct {
 
@@ -84,19 +87,50 @@ handle_conn :: proc(conn: ^Conn) {
     packet_size, _ := endian.get_u32(packet_size_b, endian.Byte_Order.Big)
 
     // make buffer
-    buf, make_buf_err := make([]byte, packet_size)
+    all_data_buf, make_buf_err := make([]byte, packet_size)
+    if make_buf_err != nil {
+        fmt.printfln("error creating buffer for packet: %s", make_buf_err)
+        return
+    }
+    defer delete(all_data_buf)
 
     // read into buffer
-    _, err = net.recv_tcp(conn.socket, buf)
+    _, err = net.recv_tcp(conn.socket, all_data_buf)
     if err != nil {
-        fmt.printfln("error reading data: %s", err)
+        fmt.printfln("error reading data from socket: %s", err)
+        return
     }
 
-    create_file(buf)
+    // Key Length (u32)
+    key_size, _ := endian.get_u32(all_data_buf[:4], endian.Byte_Order.Big)
+
+    // Read Key
+    key := all_data_buf[4:4 + key_size]
+
+    // Read File Data
+    file_data := all_data_buf[4 + key_size:]
+
+    // Hash Key
+    sha_context: sha3.Context
+    sha3.init_256(&sha_context)
+    sha3.update(&sha_context, key)
+    hash: [32]byte
+    sha3.final(&sha_context, hash[:])
+
+    // Encode Key Hash to Hex String
+    hash_hex := hex.encode(hash[:])
+    file_name, hex_clone_err := strings.clone_from_bytes(hash_hex)
+    if hex_clone_err != nil {
+        fmt.printfln("error cloning hash hex to string, %s", hex_clone_err)
+        return
+    }
+    defer delete(file_name)
+
+    create_file(file_name, file_data)
 }
 
 // TODO: Create and add error return type
-create_file :: proc(file_data: []byte) {    
+create_file :: proc(file_name: string, file_data: []byte) {    
     flags: int = os.O_WRONLY|os.O_CREATE
 
 	mode: int = 0
@@ -104,8 +138,21 @@ create_file :: proc(file_data: []byte) {
         mode = os.S_IRUSR | os.S_IWUSR | os.S_IRGRP | os.S_IROTH
     }
 
-	fd, _ := os.open("./data/file", flags, mode)
+    file_path, concat_err := strings.concatenate({"./data/", file_name})
+    if concat_err != nil {
+        fmt.println("error concatenating file path parts: %s", concat_err)
+        return
+    }
+    defer delete(file_path)
+
+	fd, open_err := os.open(file_path, flags, mode)
+    if open_err != nil {
+        fmt.printfln("error opening file: %s", open_err)
+    }
 	defer os.close(fd)
 
-	os.write(fd, file_data)
+	_, write_err := os.write(fd, file_data)
+    if write_err != nil {
+        fmt.printfln("error writing to file: %s", write_err)
+    }
 }
